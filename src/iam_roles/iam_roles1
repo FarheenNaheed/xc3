@@ -1,0 +1,55 @@
+import json
+import boto3
+import csv
+from io import StringIO
+
+def lambda_handler(event, context):
+    # Function to handle AWS Lambda events (not used in this script)
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Hello from SNS')
+    }
+
+def get_cost_and_usage_from_s3(bucket_name, file_key):
+    """
+    Retrieve cost and usage data from a CSV file stored in an S3 bucket.
+    """
+    s3 = boto3.client('s3')
+    response = s3.get_object(Bucket=bucket_name, Key=file_key)
+    csv_data = response['Body'].read().decode('utf-8')
+    
+    # Parse CSV data
+    cost_and_usage = []
+    csv_reader = csv.DictReader(StringIO(csv_data))
+    for row in csv_reader:
+        cost_and_usage.append(row)
+    
+    return cost_and_usage
+
+def process_cost_and_usage(cost_and_usage):
+    """
+    Process the retrieved cost and usage data and print specific fields.
+    """
+    sns = boto3.client('sns')
+    
+    for entry in cost_and_usage:
+        product_name = entry.get('product/servicecode')
+        
+        # Check if the product/service code is Amazon SNS
+        if product_name == 'AmazonSNS':
+            print("Product:", product_name)
+            print("ResourceId:", entry.get('lineItem/ResourceId'))
+            print("UsageAmount:", entry.get('lineItem/UsageAmount'))
+            print("UnblendedCost:", entry.get('lineItem/UnblendedCost'))
+            print("Location:", entry.get('product/location'))
+            
+
+# Using the existing S3 bucket details of CUR reports
+bucket_name = 'reportbuket'
+file_key = 'Team3report-00001_New.csv'
+
+# Retrieve cost and usage data from S3
+cost_and_usage = get_cost_and_usage_from_s3(bucket_name, file_key)
+
+# Process and print specific fields from the retrieved data
+process_cost_and_usage(cost_and_usage)
