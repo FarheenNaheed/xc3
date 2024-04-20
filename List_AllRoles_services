@@ -1,0 +1,110 @@
+import boto3
+import datetime
+import json
+import logging
+
+def extract_services_from_policy(policy_document):
+    services = set()
+    for statement in policy_document.get('Statement', []):
+        if 'Action' in statement:
+            actions = statement['Action']
+            if isinstance(actions, str):
+                actions = [actions]
+            for action in actions:
+                parts = action.split(':')
+                if len(parts) >= 2:
+                    services.add(parts[0])
+    return services
+
+def list_all_roles(iam_client):
+    # Retrieve the IAM roles in the account
+    response = iam_client.list_roles()
+
+    roles = {}
+
+    # Process each role
+    for role in response['Roles']:
+        role_name = role['RoleName']
+
+        roles[role_name] = []
+
+        # Retrieve attached policies
+        attached_policies_response = iam_client.list_attached_role_policies(RoleName=role_name)
+        for policy in attached_policies_response['AttachedPolicies']:
+            policy_name = policy['PolicyName']
+            policy_response = iam_client.get_policy(PolicyArn=policy['PolicyArn'])
+            if 'Policy' in policy_response and 'PolicyDocument' in policy_response['Policy']:
+                policy_document = policy_response['Policy']['PolicyDocument']
+                services = extract_services_from_policy(policy_document)
+                roles[role_name].extend(services)
+
+        # Retrieve inline policies
+        inline_policies_response = iam_client.list_role_policies(RoleName=role_name)
+        for policy_name in inline_policies_response['PolicyNames']:
+            policy_response = iam_client.get_role_policy(RoleName=role_name, PolicyName=policy_name)
+            if 'PolicyDocument' in policy_response:
+                policy_document = policy_response['PolicyDocument']
+                services = extract_services_from_policy(policy_document)
+                roles[role_name].extend(services)
+
+    return roles
+
+def calculate_service_costs(ce_client, roles, start_date, end_date):
+    role_costs = {}
+    for role, services in roles.items():
+        total_cost = 0.0
+        for service in services:
+            response = ce_client.get_cost_and_usage(
+                TimePeriod={
+                    'Start': start_date.strftime('%Y-%m-%d'),
+                    'End': end_date.strftime('%Y-%m-%d')
+                },
+                Granularity='DAILY',
+                Metrics=['UnblendedCost'],
+                Filter={
+                    'Dimensions': {
+                        'Key': 'SERVICE',
+                        'Values': [service]
+                    }
+                }
+            )
+            for result in response['ResultsByTime']:
+                total_cost += float(result['Total']['UnblendedCost']['Amount'])
+        role_costs[role] = round(total_cost, 2)
+    return role_costs
+
+def lambda_handler(event, context):
+    try:
+        # Initialize AWS clients
+        iam_client = boto3.client('iam')
+        ce_client = boto3.client('ce', region_name='ap-southeast-2')  # Cost Explorer API only available in us-east-1
+
+        # Set up date range for cost calculation (last 14 days)
+        start_date = datetime.datetime.now() - datetime.timedelta(days=14)
+        end_date = datetime.datetime.now()
+
+        # Retrieve IAM roles associated with SNS
+        roles = list_all_roles(iam_client)
+
+        # Calculate the costs for each role
+        role_costs = calculate_service_costs(ce_client, roles, start_date, end_date)
+
+        # Construct response
+        response = {
+            'statusCode': 200,
+            'body': json.dumps({'IAM_Roles': roles, 'Costs': role_costs})
+        }
+    except Exception as e:
+        logging.error(f"Error in lambda_handler: {str(e)}")
+        response = {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }
+    
+    return response
+
+# For testing locally
+if __name__ == "__main__":
+    event = {}
+    context = {}
+    print(lambda_handler(event, context))
